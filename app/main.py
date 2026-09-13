@@ -207,6 +207,7 @@ class PageEdit(BaseModel):
 
 
 class BookEdit(BaseModel):
+    revision: int | None = None
     title: str = Field(min_length=1, max_length=300)
     pages: list[PageEdit] = Field(max_length=500)
 
@@ -217,6 +218,8 @@ def save(job_id: str, edit: BookEdit):
         job = get_job(job_id)
         if job['status'] in ('running', 'queued'):
             raise HTTPException(409, '请等待识别完成后校对')
+        if edit.revision is not None and edit.revision != job.get('revision',0):
+            raise HTTPException(409, '内容已被其他操作更新，请重新打开任务后校对')
         if [p.number for p in edit.pages] != [p['number'] for p in job['pages']]:
             raise HTTPException(400, '页面不匹配，请刷新')
         for current, revised in zip(job['pages'], edit.pages):
@@ -235,8 +238,9 @@ def save(job_id: str, edit: BookEdit):
                     figure.update(included=new.included, before_block=new.before_block, caption=new.caption)
             for block, new in zip(current['blocks'], revised.blocks):
                 block.update(kind=new.kind, text=new.text)
+        job['revision'] = job.get('revision', 0) + 1
         persist(job)
-    return {'ok': True}
+    return {'ok': True, 'revision': job['revision']}
 
 
 @app.get('/api/jobs/{job_id}/pages/{number}')
@@ -346,5 +350,8 @@ def download(job_id: str, filename: str):
         raise HTTPException(404)
     return FileResponse(path, filename=f"{jobs[job_id]['title'][:100]}.{path.suffix[1:]}")
 
+
+from .proofreader import register_proofreading
+register_proofreading(app, jobs, lock, persist)
 
 app.mount('/', StaticFiles(directory=ROOT / 'app/static', html=True), name='web')

@@ -84,6 +84,9 @@ def test_api_validation_and_edit(tmp_path, monkeypatch):
     assert client.put('/api/jobs/test', json=changed).status_code == 200
     assert job['pages'][0]['blocks'][0]['confidence'] == .9
     assert job['pages'][0]['blocks'][0]['text'] == 'new'
+    stale = {**changed, 'revision': 0}
+    assert client.put('/api/jobs/test', json=stale).status_code == 409
+    assert job['revision'] == 1
     changed['pages'][0]['number'] = 2
     assert client.put('/api/jobs/test',json=changed).status_code == 400
     assert client.post('/api/jobs/test/export',json={'format':'exe'}).status_code == 422

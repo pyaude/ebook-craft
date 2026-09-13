@@ -1,5 +1,5 @@
 const $ = id => document.getElementById(id);
-let selected, job, pageIndex = 0, pollTimer, dirty = false;
+let selected, job, pageIndex = 0, pollTimer, proofTimer, dirty = false;
 function notice(text) { $('notice').textContent = text; $('notice').hidden = false; clearTimeout(notice.timer); notice.timer = setTimeout(() => $('notice').hidden = true, 6500); }
 async function api(url, options = {}) { const res = await fetch(url, options); if (!res.ok) { let data; try { data = await res.json(); } catch {} throw Error(typeof data?.detail === 'string' ? data.detail : `请求失败 (${res.status})`); } return res.json(); }
 function choose(file) { if (!file) return; if (!file.name.toLowerCase().endsWith('.pdf')) return notice('请选择 PDF 文件'); selected = file; $('file-label').textContent = `${file.name} · ${(file.size / 1048576).toFixed(1)} MB`; $('convert').disabled = false; }
@@ -10,16 +10,16 @@ $('dropzone').ondragover = e => { e.preventDefault(); $('dropzone').classList.ad
 $('dropzone').ondragleave = () => $('dropzone').classList.remove('drag');
 $('dropzone').ondrop = e => {e.preventDefault(); $('dropzone').classList.remove('drag'); choose(e.dataTransfer.files[0]);};
 async function history() { try { const items = await api('/api/jobs'); $('history').replaceChildren(); for (const item of items) { const b = document.createElement('button'); b.className = 'history-item'; b.textContent = '▤  ' + item.title; b.title = item.title; b.onclick = () => openJob(item.id); $('history').append(b); } } catch(e) { notice(e.message); } }
-$('new-book').onclick = async () => { if(dirty) {try {await save();} catch(e){return notice(e.message);}} clearTimeout(pollTimer); job = null; $('upload-view').hidden = false; $('job-view').hidden = true; };
+$('new-book').onclick = async () => { if(dirty) {try {await save();} catch(e){return notice(e.message);}} clearTimeout(pollTimer); clearTimeout(proofTimer); job = null; $('upload-view').hidden = false; $('job-view').hidden = true; };
 $('convert').onclick = async () => { if(!selected) return; const body = new FormData(); body.append('file', selected); body.append('start', $('start').value || 1); body.append('end', $('end').value || 0); body.append('dpi', $('dpi').value); body.append('correct_scan', $('correct-scan').checked); $('convert').disabled = true; $('convert').textContent = '正在上传…'; try { const data = await api('/api/jobs', {method:'POST', body}); await openJob(data.id); history(); } catch(e) {notice(e.message);} finally {$('convert').disabled = false; $('convert').textContent = '开始识别 →';} };
-async function openJob(id) { try { if(dirty) await save(); clearTimeout(pollTimer); job = await api(`/api/jobs/${id}`); pageIndex = 0; dirty = false; $('upload-view').hidden = true; $('job-view').hidden = false; renderJob(); if(['queued','running'].includes(job.status)) pollTimer = setTimeout(poll, 1500); } catch(e) {notice(e.message);} }
+async function openJob(id) { try { if(dirty) await save(); clearTimeout(pollTimer); clearTimeout(proofTimer); job = await api(`/api/jobs/${id}`); pageIndex = 0; dirty = false; $('upload-view').hidden = true; $('job-view').hidden = false; renderJob(); refreshModels(); scheduleProof(); if(['queued','running'].includes(job.status)) pollTimer = setTimeout(poll, 1500); } catch(e) {notice(e.message);} }
 async function poll() { const id = job?.id; if(!id) return; try {const fresh = await api(`/api/jobs/${id}`); if(job?.id !== id) return; job = fresh; renderJob(); if(['queued','running'].includes(job.status)) pollTimer = setTimeout(poll, 1800); else history();} catch(e){notice(e.message); pollTimer = setTimeout(poll, 4000);} }
 function renderJob() { $('job-title').textContent = job.title; $('status').textContent = `${job.message}  ${job.completed} / ${job.total}`; $('progress').style.width = `${job.completed/job.total*100}%`; const busy = ['queued','running'].includes(job.status); $('cancel').hidden = !busy; $('editor').hidden = busy || !job.pages.length; $('step2').classList.add('on'); $('step3').classList.toggle('on', !busy && !!job.pages.length); if(!busy && job.pages.length) {$('book-title').value = job.title; renderPage();} }
-function renderPage() { const page = job.pages[pageIndex]; renderCorrection(page); $('page-label').textContent = `第 ${page.number} 页`; $('page-counter').textContent = `${pageIndex+1} / ${job.pages.length}`; $('prev').disabled = pageIndex === 0; $('next').disabled = pageIndex === job.pages.length-1; $('retain').checked = page.retain_original; $('blocks').replaceChildren(); renderFigures(page); if(!page.blocks.length) { const p = document.createElement('p'); p.textContent = '本页未识别出文字，将自动保留扫描图。'; $('blocks').append(p); } for(const block of page.blocks) {const div = document.createElement('div'); div.className = 'block' + (block.confidence < .85 ? ' low' : ''); const top = document.createElement('div'); top.className = 'block-top'; const select = document.createElement('select'); select.setAttribute('aria-label','段落类型'); for(const [value, label] of [['paragraph','正文'],['heading','标题'],['grid','网格'],['omit','忽略']]) {const opt = document.createElement('option'); opt.value=value; opt.textContent=label; select.append(opt);} select.value=block.kind; select.onchange=()=>{block.kind=select.value; dirty=true; renderPage();}; const score=document.createElement('span'); score.textContent = `识别置信度 ${Math.round(block.confidence*100)}%`; top.append(select, score); const area=document.createElement('textarea'); area.setAttribute('aria-label','校对文字'); area.value=block.text; area.rows = Math.min(12, Math.max(2, Math.ceil(block.text.length/24))); area.oninput=()=>{block.text=area.value; dirty=true;}; div.append(top, area); if(block.kind === 'grid') { const help=document.createElement('small'); help.textContent='每行是一排，Tab 分列；下方可逐格校对。修改上方文本后移开焦点更新网格。'; div.append(help); const cells=document.createElement('div'); cells.className='grid-cells'; div.append(cells); renderGridEditor(block,cells,area); area.onchange=()=>renderGridEditor(block,cells,area); area.onkeydown=e=>{if(e.key==='Tab' && !e.shiftKey){e.preventDefault();area.setRangeText('\t',area.selectionStart,area.selectionEnd,'end');block.text=area.value;dirty=true;}}; } $('blocks').append(div); } }
+function renderPage() { const page = job.pages[pageIndex]; renderCorrection(page); $('page-label').textContent = `第 ${page.number} 页`; $('page-counter').textContent = `${pageIndex+1} / ${job.pages.length}`; $('prev').disabled = pageIndex === 0; $('next').disabled = pageIndex === job.pages.length-1; $('retain').checked = page.retain_original; $('blocks').replaceChildren(); renderFigures(page); if(!page.blocks.length) { const p = document.createElement('p'); p.textContent = '本页未识别出文字，将自动保留扫描图。'; $('blocks').append(p); } for(const block of page.blocks) {const div = document.createElement('div'); div.className = 'block' + (block.confidence < .85 ? ' low' : ''); const top = document.createElement('div'); top.className = 'block-top'; const select = document.createElement('select'); select.setAttribute('aria-label','段落类型'); for(const [value, label] of [['paragraph','正文'],['heading','标题'],['grid','网格'],['omit','忽略']]) {const opt = document.createElement('option'); opt.value=value; opt.textContent=label; select.append(opt);} select.value=block.kind; select.onchange=()=>{block.kind=select.value; dirty=true; renderPage();}; const score=document.createElement('span'); score.textContent = `识别置信度 ${Math.round(block.confidence*100)}%`; top.append(select, score); const area=document.createElement('textarea'); area.setAttribute('aria-label','校对文字'); area.value=block.text; area.rows = Math.min(12, Math.max(2, Math.ceil(block.text.length/24))); area.oninput=()=>{block.text=area.value; dirty=true;}; div.append(top, area); if(block.kind === 'grid') { const help=document.createElement('small'); help.textContent='每行是一排，Tab 分列；下方可逐格校对。修改上方文本后移开焦点更新网格。'; div.append(help); const cells=document.createElement('div'); cells.className='grid-cells'; div.append(cells); renderGridEditor(block,cells,area); area.onchange=()=>renderGridEditor(block,cells,area); area.onkeydown=e=>{if(e.key==='Tab' && !e.shiftKey){e.preventDefault();area.setRangeText('\t',area.selectionStart,area.selectionEnd,'end');block.text=area.value;dirty=true;}}; } if(block.proofread_history?.length) { const details=document.createElement('details'), summary=document.createElement('summary'); summary.textContent='查看智能校对记录'; details.append(summary); for(const h of block.proofread_history) { const record=document.createElement('p'); record.style.whiteSpace='pre-wrap'; record.textContent=`${h.undone?'已撤销':'修改记录'}\n修改前：${h.before}\n修改后：${h.after}`; details.append(record); } div.append(details); } $('blocks').append(div); } renderProof(); }
 $('prev').onclick=()=>{pageIndex--; renderPage();}; $('next').onclick=()=>{pageIndex++; renderPage();};
 $('retain').onchange=()=>{job.pages[pageIndex].retain_original=$('retain').checked;dirty=true;};
 $('book-title').oninput=()=>{dirty=true;};
-async function save() { const title = $('book-title').value.trim(); if(!title) throw Error('请输入书名'); await api(`/api/jobs/${job.id}`, {method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({title,pages:job.pages.map(p=>({number:p.number,retain_original:p.retain_original,figures:(p.figures || []).map(f=>({id:f.id,included:f.included,before_block:f.before_block,caption:f.caption || ''})),blocks:p.blocks.map(b=>({kind:b.kind,text:b.text}))}))})}); job.title=title; dirty=false; $('job-title').textContent=title; }
+async function save() { const title = $('book-title').value.trim(); if(!title) throw Error('请输入书名'); const saved = await api(`/api/jobs/${job.id}`, {method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({title,revision:job.revision ?? 0,pages:job.pages.map(p=>({number:p.number,retain_original:p.retain_original,figures:(p.figures || []).map(f=>({id:f.id,included:f.included,before_block:f.before_block,caption:f.caption || ''})),blocks:p.blocks.map(b=>({kind:b.kind,text:b.text}))}))})}); job.revision=saved.revision; job.title=title; dirty=false; $('job-title').textContent=title; }
 $('save').onclick=async()=>{try{await save();notice('校对已保存');history();}catch(e){notice(e.message);}};
 $('cancel').onclick=async()=>{try{await api(`/api/jobs/${job.id}/cancel`,{method:'POST'});clearTimeout(pollTimer);await poll();}catch(e){notice(e.message);}};
 async function exportBook(format) { $('pdf').disabled=$('epub').disabled=true; notice('正在排版并嵌入字体…'); try {await save(); const data=await api(`/api/jobs/${job.id}/export`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({format,font_size:Number($('font-size').value),leading:Number($('leading').value),page_size:$('page-size').value,include_originals:$('originals').checked})}); const a=document.createElement('a'); a.href=data.url; a.download=''; document.body.append(a); a.click(); a.remove(); notice('已生成，下载即将开始');}catch(e){notice(e.message);}finally{$('pdf').disabled=$('epub').disabled=false;} }
@@ -148,3 +148,63 @@ function renderGridEditor(block, target, area) {
   });
   target.append(table);
 }
+
+function proofBusy() { return ['queued','running'].includes(job?.proofreading?.status); }
+async function refreshModels() {
+  try { const data=await api('/api/proofreading/models'); const select=$('proof-model'), previous=select.value; select.replaceChildren();
+    for(const name of data.models) {const opt=document.createElement('option');opt.value=name;opt.textContent=name;select.append(opt);}
+    if(data.models.includes(previous)) select.value=previous;
+    $('proof-model-note').textContent=data.models.length ? '模型在本机运行，书籍内容不会上传。首次分析可能较慢。' : data.message+'。请启动 Ollama 并下载模型，详见 README 的智能校对说明。';
+    renderProof();
+  } catch(e) {notice(e.message);}
+}
+function renderProof() {
+  if(!job) return;
+  const run=job.proofreading, busy=proofBusy(), suggestions=run?.suggestions || [];
+  $('proof-status').textContent=run ? `${run.message} ${run.completed} / ${run.total} 页` : '尚未分析';
+  $('proof-start').disabled=busy || !$('proof-model').value;
+  $('proof-cancel').hidden=!busy;
+  $('proof-auto').disabled=busy;
+  $('proof-all').disabled=busy || !suggestions.some(s=>s.status==='pending');
+  $('proof-undo').disabled=busy || !suggestions.some(s=>s.status==='applied');
+  const locked=busy && run.auto_apply;
+  for(const el of document.querySelectorAll('#blocks input,#blocks select,#blocks textarea,#figures input,#figures select,#book-title,#save,#pdf,#epub,#retain,#rebuild,#crop-figure')) el.disabled=locked;
+  $('detect-figures').disabled=locked || !!job.pages[pageIndex]?.figures_detected;
+  $('proof-suggestions').replaceChildren();
+  const labels={pending:'待确认',applied:'已应用',dismissed:'已忽略',stale:'原文已变化或建议冲突，请重新分析',undone:'已撤销'};
+  for(const s of suggestions) {
+    const card=document.createElement('article');card.className='proof-suggestion';
+    const where=document.createElement('button');where.className='secondary';where.textContent=`第 ${s.page} 页 · 第 ${s.block+1} 段`;where.onclick=()=>{pageIndex=job.pages.findIndex(p=>p.number===s.page);renderPage();$('blocks').scrollIntoView({behavior:'smooth'});};
+    const before=document.createElement('del'), after=document.createElement('ins'), reason=document.createElement('p');before.textContent=s.before;after.textContent=s.after;reason.textContent=`${labels[s.status]} · ${s.reason}`;
+    card.append(where,before,after,reason);
+    if(s.status==='pending') for(const [action,label] of [['apply','应用'],['dismiss','忽略']]) {const b=document.createElement('button');b.className='secondary';b.textContent=label;b.disabled=busy;b.onclick=()=>proofAction(action,[s.id]);card.append(b);}
+    $('proof-suggestions').append(card);
+  }
+}
+function scheduleProof() { clearTimeout(proofTimer); if(proofBusy()) proofTimer=setTimeout(pollProof,1800); }
+async function pollProof() {
+  const id=job?.id;if(!id)return;
+  try {const fresh=await api(`/api/jobs/${id}`);if(job?.id!==id)return;
+    const wasAuto=job.proofreading?.auto_apply;
+    job.proofreading=fresh.proofreading;
+    if(!proofBusy() && wasAuto && !dirty) {job=fresh;renderPage();} else renderProof();
+    scheduleProof();
+  } catch(e) {notice(e.message); if(job?.id===id) proofTimer=setTimeout(pollProof,4000);}
+}
+async function proofAction(action, ids=[]) {
+  if(!job?.proofreading)return;
+  const id=job.id,runId=job.proofreading.id;
+  try {if(dirty)await save();await api(`/api/jobs/${id}/proofreading/${action}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({run_id:runId,ids})});
+    const fresh=await api(`/api/jobs/${id}`);if(job?.id===id){job=fresh;renderPage();scheduleProof();}
+  }catch(e){notice(e.message);}
+}
+$('proof-models').onclick=refreshModels;
+$('proof-start').onclick=async()=>{
+  const id=job.id; $('proof-start').disabled=true;
+  try {await save();const run=await api(`/api/jobs/${id}/proofreading`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:$('proof-model').value,page:$('proof-scope').value==='page'?job.pages[pageIndex].number:null,auto_apply:$('proof-auto').checked})});
+    if(job?.id===id){job.proofreading=run;renderProof();scheduleProof();}
+  }catch(e){notice(e.message);renderProof();}
+};
+$('proof-cancel').onclick=()=>proofAction('cancel');
+$('proof-all').onclick=()=>proofAction('apply',job.proofreading.suggestions.filter(s=>s.status==='pending').map(s=>s.id));
+$('proof-undo').onclick=()=>proofAction('undo');

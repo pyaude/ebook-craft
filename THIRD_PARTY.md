@@ -11,6 +11,8 @@
 | pypdfium2 / PDFium | PDF 渲染 | https://github.com/pypdfium2-team/pypdfium2 | pypdfium2 为 Apache-2.0 或 BSD-3-Clause；PDFium 及其第三方代码另附许可证 |
 | ReportLab | PDF 生成 | https://www.reportlab.com | BSD |
 | FastAPI | Web API | https://github.com/fastapi/fastapi | MIT |
+| Ollama（可选） | 本地语言模型推理服务 | https://github.com/ollama/ollama | MIT；运行时第三方库另附许可证 |
+| Qwen2.5-1.5B-Instruct（可选） | 上下文 OCR 校对 | https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct | Apache-2.0；权重单独下载 |
 | 霞鹜文楷 | PDF/EPUB 嵌入字体 | https://github.com/lxgw/LxgwWenKai | SIL OFL 1.1；见 assets/OFL.txt |
 
 
