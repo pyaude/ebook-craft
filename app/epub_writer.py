@@ -23,6 +23,7 @@ class EpubWriter:
         self.identifier = str(uuid4())
         self.assets = {}
         self.chapters = []
+        self.navigation = None
 
     def add_asset(self, name, media_type, content):
         path = PurePosixPath(name)
@@ -39,10 +40,29 @@ class EpubWriter:
     def write(self, output):
         if not self.chapters:
             raise ValueError('EPUB 至少需要一个章节')
-        links = ''.join(f'<li><a href="{escape(name)}">{escape(title)}</a></li>' for name, title in self.chapters)
-        nav = xhtml(self.title, f'<nav epub:type="toc" id="toc"><h1>目录</h1><ol>{links}</ol></nav>', self.language)
-        points = ''.join(f'<navPoint id="point-{i}" playOrder="{i}"><navLabel><text>{escape(title)}</text></navLabel><content src="{escape(name)}"/></navPoint>' for i,(name,title) in enumerate(self.chapters,1))
-        ncx = (XML + f'<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1"><head><meta name="dtb:uid" content="{self.identifier}"/><meta name="dtb:depth" content="1"/><meta name="dtb:totalPageCount" content="0"/><meta name="dtb:maxPageNumber" content="0"/></head><docTitle><text>{escape(self.title)}</text></docTitle><navMap>{points}</navMap></ncx>').encode()
+        entries = self.navigation if self.navigation else [dict(href=name, title=title, level=1) for name,title in self.chapters]
+        roots = []; stack = []
+        for i, entry in enumerate(entries, 1):
+            href = entry['href']
+            name, _, anchor = href.partition('#')
+            if name not in self.assets:
+                raise ValueError('目录指向不存在的章节')
+            if anchor:
+                root = ET.fromstring(self.assets[name][1])
+                if not any(node.get('id') == anchor for node in root.iter()):
+                    raise ValueError('目录指向不存在的标题')
+            node = {**entry, 'index': i, 'children': []}
+            while stack and stack[-1]['level'] >= node['level']:
+                stack.pop()
+            (stack[-1]['children'] if stack else roots).append(node)
+            stack.append(node)
+        def html_nodes(nodes):
+            return '<ol>' + ''.join(f'<li><a href="{escape(n["href"])}">{escape(n["title"])}</a>' + (html_nodes(n['children']) if n['children'] else '') + '</li>' for n in nodes) + '</ol>'
+        def ncx_nodes(nodes):
+            return ''.join(f'<navPoint id="point-{n["index"]}" playOrder="{n["index"]}"><navLabel><text>{escape(n["title"])}</text></navLabel><content src="{escape(n["href"])}"/>' + ncx_nodes(n['children']) + '</navPoint>' for n in nodes)
+        nav = xhtml(self.title, f'<nav epub:type="toc" id="toc"><h1>目录</h1>{html_nodes(roots)}</nav>', self.language)
+        depth = max(e['level'] for e in entries)
+        ncx = (XML + f'<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1"><head><meta name="dtb:uid" content="{self.identifier}"/><meta name="dtb:depth" content="{depth}"/><meta name="dtb:totalPageCount" content="0"/><meta name="dtb:maxPageNumber" content="0"/></head><docTitle><text>{escape(self.title)}</text></docTitle><navMap>{ncx_nodes(roots)}</navMap></ncx>').encode()
         assets = {**self.assets, 'nav.xhtml': ('application/xhtml+xml', nav), 'toc.ncx': ('application/x-dtbncx+xml', ncx)}
         ids = {name: f'item-{i}' for i,name in enumerate(assets)}
         manifest = ''.join(f'<item id="{ids[name]}" href="{escape(name)}" media-type="{mime}"' + (' properties="nav"' if name == 'nav.xhtml' else '') + '/>' for name,(mime,_) in assets.items())

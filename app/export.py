@@ -4,13 +4,35 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.enums import TA_JUSTIFY
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image, PageBreak, Table, TableStyle
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image, PageBreak, Table, TableStyle, Flowable
 from reportlab.lib.utils import ImageReader
 from .epub_writer import EpubWriter
 from .figures import page_content
 from .structure import grid_cells
+from .chapters import resolve_chapters
+from reportlab.platypus.tableofcontents import TableOfContents
 
 ROOT = Path(__file__).resolve().parent.parent
+
+
+class ChapterAnchor(Flowable):
+    """Zero-height destination kept with the next rendered text block."""
+    _ZEROSIZE = True
+    def __init__(self, entry):
+        super().__init__()
+        self.entry = entry
+        self.keepWithNext = True
+    def draw(self):
+        pass
+
+
+class ChapterDocTemplate(SimpleDocTemplate):
+    def afterFlowable(self, flowable):
+        if isinstance(flowable, ChapterAnchor):
+            entry = flowable.entry
+            self.canv.bookmarkPage(entry['anchor'], fit='XYZ', left=42, top=self.frame._y, zoom=0)
+            self.canv.addOutlineEntry(entry['title'], entry['anchor'], entry['level'] - 1, closed=False)
+            self.notify('TOCEntry', (entry['level'] - 1, escape(entry['title']), self.page, entry['anchor']))
 
 
 def export_book(job, directory, fmt, font_size=11, leading=1.8, page_size='A5', include_originals=False):
@@ -18,6 +40,8 @@ def export_book(job, directory, fmt, font_size=11, leading=1.8, page_size='A5', 
     if not font.exists():
         raise ValueError('缺少中文字体，请运行 python scripts/setup_font.py')
     title = job['title']
+    chapters = resolve_chapters(job)
+    destinations = {(e['page'], e['block']):e for e in chapters}
     output = directory / f'book.{fmt}'
     if fmt == 'pdf':
         if 'WenKai' not in pdfmetrics.getRegisteredFontNames():
@@ -28,7 +52,14 @@ def export_book(job, directory, fmt, font_size=11, leading=1.8, page_size='A5', 
                               wordWrap='CJK', firstLineIndent=font_size * 2, spaceAfter=font_size * .65, alignment=TA_JUSTIFY)
         heading = ParagraphStyle('heading', parent=body, fontSize=font_size * 1.5, leading=font_size * 2.1, spaceBefore=18, spaceAfter=12, keepWithNext=True, firstLineIndent=0, alignment=0)
         story = [Paragraph(escape(title), heading), Spacer(1, 20)]
+        if chapters:
+            toc = TableOfContents()
+            toc.levelStyles = [ParagraphStyle(f'toc-{i}', fontName='WenKai', fontSize=font_size,
+                               leading=font_size*1.7, leftIndent=i*16, firstLineIndent=0,
+                               rightIndent=28, spaceBefore=6) for i in range(3)]
+            story.extend([Paragraph('目录', heading), toc, PageBreak()])
         for page in job['pages']:
+            block_indices = {id(b):i for i,b in enumerate(page['blocks'])}
             for kind, block in page_content(page):
                 if kind == 'text' and block['kind'] == 'grid':
                     cells = grid_cells(block['text'])
@@ -48,7 +79,13 @@ def export_book(job, directory, fmt, font_size=11, leading=1.8, page_size='A5', 
                     story.append(Spacer(1, 12))
                     continue
                 if block['kind'] != 'omit' and block['text'].strip():
-                    style = heading if block['kind'] == 'heading' else body
+                    entry = destinations.get((page['number'], block_indices[id(block)]))
+                    if entry:
+                        story.append(ChapterAnchor(entry))
+                    style = heading if entry or block['kind'] == 'heading' else body
+                    if entry:
+                        style = ParagraphStyle('chapter-heading', parent=heading,
+                                               fontSize=font_size*(1.5-.15*(entry['level']-1)))
                     if block.get('alignment') == 'center':
                         style = ParagraphStyle('centered', parent=style, alignment=1, firstLineIndent=0)
                     story.append(Paragraph(escape(block['text']).replace('\n', '<br/>'), style))
@@ -63,10 +100,15 @@ def export_book(job, directory, fmt, font_size=11, leading=1.8, page_size='A5', 
             canvas.setFont('WenKai', 8)
             canvas.setFillColorRGB(.45, .45, .45)
             canvas.drawCentredString(size[0] / 2, 23, str(doc.page))
-        SimpleDocTemplate(str(output), pagesize=size, rightMargin=42, leftMargin=42, topMargin=42, bottomMargin=42, title=title, author='').build(story, onFirstPage=footer, onLaterPages=footer)
+        doc = ChapterDocTemplate(str(output), pagesize=size, rightMargin=42, leftMargin=42,
+                                 topMargin=42, bottomMargin=42, title=title, author='')
+        if chapters:
+            doc.multiBuild(story, onFirstPage=footer, onLaterPages=footer)
+        else:
+            doc.build(story, onFirstPage=footer, onLaterPages=footer)
     else:
         book = EpubWriter(title)
-        css = '@font-face{font-family:WenKai;src:url("../fonts/wenkai.ttf")}body{font-family:WenKai,serif;line-height:1.8;margin:5%;}p{text-align:justify;text-indent:2em;}h1{font-size:1.5em;}img{max-width:100%;height:auto}.author-grid{width:100%;table-layout:fixed;border-collapse:collapse;margin:1em 0}.author-grid td{text-align:center;vertical-align:top;padding:.5em;overflow-wrap:anywhere}.centered{text-align:center;text-indent:0}'
+        css = '@font-face{font-family:WenKai;src:url("../fonts/wenkai.ttf")}body{font-family:WenKai,serif;line-height:1.8;margin:5%;}p{text-align:justify;text-indent:2em;}h1{font-size:1.5em;}h2{font-size:1.35em;}h3{font-size:1.2em;}img{max-width:100%;height:auto}.author-grid{width:100%;table-layout:fixed;border-collapse:collapse;margin:1em 0}.author-grid td{text-align:center;vertical-align:top;padding:.5em;overflow-wrap:anywhere}.centered{text-align:center;text-indent:0}'
         book.add_asset('fonts/wenkai.ttf', 'font/ttf', font.read_bytes())
         book.add_asset('styles/book.css', 'text/css', css.encode())
         license_path = ROOT / 'assets/OFL.txt'
@@ -75,6 +117,7 @@ def export_book(job, directory, fmt, font_size=11, leading=1.8, page_size='A5', 
         for page in job['pages']:
             chapter_title = f"原书第 {page['number']} 页"
             content = []
+            block_indices = {id(b):i for i,b in enumerate(page['blocks'])}
             for kind, block in page_content(page):
                 if kind == 'text' and block['kind'] == 'grid':
                     cells = grid_cells(block['text'])
@@ -89,15 +132,20 @@ def export_book(job, directory, fmt, font_size=11, leading=1.8, page_size='A5', 
                     continue
                 if block['kind'] == 'omit' or not block['text'].strip():
                     continue
-                tag = 'h1' if block['kind'] == 'heading' else 'p'
+                entry = destinations.get((page['number'], block_indices[id(block)]))
+                tag = f'h{entry["level"]}' if entry else ('h1' if block['kind'] == 'heading' else 'p')
+                anchor = f' id="{entry["anchor"]}"' if entry else ''
                 if tag == 'h1':
                     chapter_title = block['text'][:80]
                 align = ' class="centered"' if block.get('alignment') == 'center' else ''
-                content.append(f'<{tag}{align}>{escape(block["text"]).replace(chr(10), "<br/>")}</{tag}>')
+                content.append(f'<{tag}{anchor}{align}>{escape(block["text"]).replace(chr(10), "<br/>")}</{tag}>')
             if include_originals or page.get('retain_original') or (not page['blocks'] and not any(f.get('included', True) for f in page.get('figures', []))):
                 name = f"images/page-{page['number']}.jpg"
                 book.add_asset(name, 'image/jpeg', ((directory / f"raw-{page['number']}.jpg") if (directory / f"raw-{page['number']}.jpg").exists() else (directory / f"page-{page['number']}.jpg")).read_bytes())
                 content.append(f'<img src="{name}" alt="原书第 {page["number"]} 页扫描图"/>')
             book.add_chapter(f"page-{page['number']}.xhtml", chapter_title, ''.join(content) or '<p>本页无正文。</p>')
+        if chapters:
+            book.navigation = [dict(href=f'page-{e["page"]}.xhtml#{e["anchor"]}',
+                                    title=e['title'], level=e['level']) for e in chapters]
         book.write(output)
     return output

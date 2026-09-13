@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 from .layout import reconstruct
 from .geometry import recognize_corrected
 from .structure import reconstruct_structure
+from .chapters import detect_chapters
 from .export import export_book
 from .figures import extract_figures, make_figure
 
@@ -92,7 +93,8 @@ def process(job_id):
                 job['completed'] += 1
                 persist(job)
         with lock:
-            job.update(status='ready', message='识别完成，请校对后导出。')
+            job['toc'] = detect_chapters(job)
+            job.update(status='ready', message='识别完成，已生成章节目录，请校对后导出。')
             persist(job)
     except Exception as exc:
         logging.exception('OCR failed')
@@ -206,7 +208,16 @@ class PageEdit(BaseModel):
     figures: list[FigureEdit] | None = Field(default=None, max_length=100)
 
 
+class TocEntry(BaseModel):
+    page: int = Field(ge=1)
+    block: int = Field(ge=0)
+    title: str = Field(default='', max_length=160)
+    level: int = Field(ge=1, le=3)
+    included: bool = True
+
+
 class BookEdit(BaseModel):
+    toc: list[TocEntry] | None = Field(default=None, max_length=2000)
     revision: int | None = None
     title: str = Field(min_length=1, max_length=300)
     pages: list[PageEdit] = Field(max_length=500)
@@ -230,6 +241,12 @@ def save(job_id: str, edit: BookEdit):
                     raise HTTPException(409, '插图已变更，请重新打开任务')
                 if any(f.before_block > len(current['blocks']) for f in revised.figures):
                     raise HTTPException(400, '插图位置超出段落范围')
+        if edit.toc is not None:
+            targets = {(p['number'], i) for p in job['pages'] for i in range(len(p['blocks']))}
+            keys = [(e.page, e.block) for e in edit.toc]
+            if len(keys) != len(set(keys)) or any(k not in targets for k in keys):
+                raise HTTPException(400, '目录目标不存在或重复')
+            job['toc'] = [e.model_dump() for e in edit.toc]
         job['title'] = edit.title
         for current, revised in zip(job['pages'], edit.pages):
             current['retain_original'] = revised.retain_original
@@ -311,6 +328,16 @@ def figure_image(job_id: str, number: int, figure_id: str):
         if figure is None:
             raise HTTPException(404, '插图不存在')
         return FileResponse(DATA / job_id / figure['file'], media_type='image/png')
+
+
+@app.post('/api/jobs/{job_id}/chapters/detect')
+def detect_toc(job_id: str):
+    # Preview only: explicit saving preserves manual edits and other task revisions.
+    with lock:
+        job = get_job(job_id)
+        if job['status'] in ('queued', 'running'):
+            raise HTTPException(409, '请等待识别完成')
+        return {'toc': detect_chapters(job)}
 
 
 class ExportOptions(BaseModel):
