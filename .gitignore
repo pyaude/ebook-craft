@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+.pytest_cache/
+data/*
+!data/.gitkeep
+assets/*.ttf
+output/
+tmp/
+.DS_Store
+
+# Private source books and local configuration
+pdf-src/
+.env
+.env.*
+!.env.example
+*.log
